@@ -1,0 +1,114 @@
+#!/bin/bash
+USERHOME=$(eval echo ~${USER})
+PARAMETERS=('FTP_HOST' 'FTP_USER' 'FTP_PASS' 'LOCAL_PUSH_DIR' 'LOCAL_PUSH_ARCHIVE_DIR' 'REMOTE_PUSH_DIR' 'LOCAL_PULL_DIR' 'REMOTE_PULL_DIR' 'LOCAL_PULL_ARCHIVE_DIR' 'PULL_ARCHIVE_AFTER_DAYS' 'PULL_ARCHIVE_CLEAR_DAYS')
+REQUIRED_PARAMETERS=('FTP_HOST' 'FTP_USER')
+
+# NOTE
+# If FTP_PASS is not provided, the ssh key of the current user will be used.
+
+# Get the provided config file
+if [ ! -z ${1} ]; then
+	INPUT_FILE_NAME=${1}
+fi
+
+# Else get the user config file
+if [ -z ${INPUT_FILE_NAME} ]; then
+	INPUT_FILE_NAME=${USERHOME}/.ftp-sync-config
+fi
+
+# Else get the system config file
+if [ -z ${INPUT_FILE_NAME} ]; then
+	INPUT_FILE_NAME=/etc/ftp-sync/config
+fi
+
+if [ -z ${INPUT_FILE_NAME} ]; then
+  echo 'Could not find config file.'
+  echo 'Either provide one as the first argument or place the config at one of the following locations.'
+  echo '  /etc/ftp-sync/config'
+  echo '  ~/.ftp-sync-config'
+  exit 1
+fi
+
+
+# Read the config
+IFS="="
+while read -r name value || [ -n "${name}" ]
+do
+	if [ $(echo ${PARAMETERS[@]} | grep -o "${name}" | wc -w) -gt 0 ]; then
+		declare ${name}="${value}"
+	fi
+done < ${INPUT_FILE_NAME}
+
+
+# Validate the config
+ISVALID=1
+for param in "${REQUIRED_PARAMETERS[@]}"
+do
+	if [ -z ${!param} ]; then
+		if [ ${ISVALID} -eq 1 ]; then
+			echo "Config file: ${INPUT_FILE_NAME}"
+		fi
+		ISVALID=0
+		echo "  Missing config value: ${param}"
+	fi
+done
+
+if [ ${ISVALID} -ne 1 ]; then
+	exit 1
+fi
+
+
+# Create missing directories
+if [ ! -z ${LOCAL_PUSH_DIR} ] && [ ! -d ${LOCAL_PUSH_DIR} ]; then
+  mkdir -p ${LOCAL_PUSH_DIR}
+fi
+
+if [ ! -z ${LOCAL_PUSH_ARCHIVE_DIR} ] && [ ! -d ${LOCAL_PUSH_ARCHIVE_DIR} ]; then
+  mkdir -p ${LOCAL_PUSH_ARCHIVE_DIR}
+fi
+
+if [ ! -z ${LOCAL_PULL_DIR} ] && [ ! -d ${LOCAL_PULL_DIR} ]; then
+  mkdir -p ${LOCAL_PULL_DIR}
+fi
+
+if [ ! -z ${LOCAL_PULL_ARCHIVE_DIR} ] && [ ! -d ${LOCAL_PULL_ARCHIVE_DIR} ]; then
+  mkdir -p ${LOCAL_PULL_ARCHIVE_DIR}
+fi
+
+# Push new files, if there are any
+if [ ! -z ${LOCAL_PUSH_DIR} ] && [ ! -z ${REMOTE_PUSH_DIR} ] && [ $(ls ${LOCAL_PUSH_DIR} | wc -l) -gt 0 ]; then
+	lftp -u ${FTP_USER},${FTP_PASS} ${FTP_HOST} << FTPCOMMANDS
+	mirror --reverse -p --verbose ${LOCAL_PUSH_DIR} ${REMOTE_PUSH_DIR}
+	bye
+FTPCOMMANDS
+	# Remove/archive pending uploads if transfer was a success
+	if [ $? -eq 0 ]; then
+		DATE=$(date '+%Y-%m-%d/%H:%M:%S')
+		IFS=$'\n'
+		for FILE in $(find ${LOCAL_PUSH_DIR}); do
+			if [ -f "${FILE}" ]; then
+				FILE_PATH=$(realpath --relative-to="${LOCAL_PUSH_DIR}" "${FILE%/*}")
+				TARGET_DIR="${LOCAL_PUSH_ARCHIVE_DIR}/${DATE}/${FILE_PATH}"
+				
+				if [ ! -z ${TARGET_DIR} ] && [ ! -d ${TARGET_DIR} ]; then
+					mkdir -p ${TARGET_DIR}
+				fi
+				
+				if [ -z ${LOCAL_PUSH_ARCHIVE_DIR} ]; then
+					rm f ${FILE}
+				else
+					mv ${FILE} ${TARGET_DIR}/${FILE##*/}
+				fi
+			fi
+		done
+	fi
+fi
+
+
+# Fetch files from the remote
+if [ ! -z ${LOCAL_PULL_DIR} ] && [ ! -z ${REMOTE_PULL_DIR} ]; then
+	lftp -u ${FTP_USER},${FTP_PASS} ${FTP_HOST} << FTPCOMMANDS
+	mirror --Remove-source-files --verbose ${REMOTE_PULL_DIR} ${LOCAL_PULL_DIR}
+	bye
+FTPCOMMANDS
+fi
